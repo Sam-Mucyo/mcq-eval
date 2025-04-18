@@ -1,0 +1,23 @@
+## Model Implementation Plan
+
+There are five steps to our mode’s implementation. 
+
+First, to balance computational capacities with cross-lingual comprehension, we begin by selecting a compact multilingual transformer from HuggingFace, like *DistilBERT-multinigula-cased* or *XLM-Robert-small*. Containing 80 to 140 million parameters, these models can grasp sentence-level semantics while still being small enough for us to fine-tune them on a single GPU.  
+
+Second, we will reframe the multiple-choice problem as a six-way classification – the five examiner-provided answers (e.g. A to E) and then a “*no answer*” class. By casting answerability and answer selection as one joint softmax over six labels, the model can determine in a single forward pass if the passage contains the answer and, if so, identify the correct option. We would continue by concatenating the text, question, and candidate answer into paired sequences (e.g. *passage* – *question* – *candidate answer*) and then truncate or pad all the sequences into a uniform length to meet the transformer’s maximum input size. 
+
+Third, we would employ the *MultipleChoice* variant of the selected transformer, which shares on an encoder for all six inputs and then applies a lightweight linear head to the pooled representations, yielding six logit-form outputs. We would then fine-tune the model, considering the following:
+
+1) Optimizer choice – potentially AdamW with a tentative weight decay of 0.01. Its decoupled L2 regularization would maintain the integrity of the pretrained weights but the adaptive momentum should yield stable fine-tuning for our small and specialized corpus.
+
+2) Initial learning rate – the original BERT paper discussed in class was fine-tuned with learning rates of 210-5, 310-5, and 510-5, with 210-5 giving the best validation performance. As the XLM-R and DistilBERT also used  210-5, leading us to believe this could be a good learning rate for the pretrained layers. We would then apply a learning rate of potentially  510-5 for the task-specific head, allowing it to learn quicker. The dual LR structure should ensure that the model can latch onto new answer-selection patterns without destabilizing its cross-language embeddings. However, this will ultimately be subject to a lot of trial and error.
+
+3) Batch size – we are considering an effective size of 32 examples. Given that we have a long-input task, we know that our computer memory will force small per-GPU batch sizes, like 8\. But this can lead to very noisy gradient estimations, slowing convergence and degrading our performance, especially since we expect the answerable versus unanswerable labels to be unbalanced. We find compromising in employing gradient accumulation, like two forward/backward passes of size 16 to simulate a batch of 32\.
+
+4) Gradient clipping – since the passages vary in length and complexity, a single input with many rate tokens or substantial context can cause a gradient spike that destabilizes the optimizer. We want to address this through gradient clipping at an L2 norm of 1, capping the outliers and preventing runaway updates that erase prior learning. But again, we will experiment with this.
+
+5) Epochs – our intuition is that a high-epoch regime might cause over-fitting because we have a relatively small dataset that has the relatively rare “no-answer” class. We will start with a mid-range number of epochs (e.g. 15 \- 20\) with a patience of 3, slowly reducing down towards a more reasonable level. 
+
+The fourth step is to evaluate the model. The most intuitive measure is the fraction of examples where the predicted label matches the true label. If we wish to isolate for if a question is answerable, we can collapse classes 0 to 4 (i.e. the 5 multiple choice answers) against class 5 and report binary F1 and accuracy. Conversely, if we wish to measure how good the model is at answering answerable questions, we will just compute the MCQ accuracy on the subset of answerable questions. We could further measure this retrieval task using Mean Reciprocal Rank, which captures how highly the system ranks the correct answer among all other candidates. This effectively simulates how confident our model is in its answer.
+
+Finally, in our testing phase, each new question-passage pair is tokenized into six candidate sequences, passed into our fine-tuned model, and the highest-scoring index is extracted. The model will either answer the question or label it as unanswerable, which we will compare to the true labels. 
